@@ -3208,7 +3208,7 @@ tun_key_to_attr(struct ofpbuf *a, const struct flow_tnl *tun_key,
 
         opts.flags = tun_key->gtpu_flags;
         opts.msgtype = tun_key->gtpu_msgtype;
-        nl_msg_put_unspec(a, OVS_TUNNEL_KEY_ATTR_GENEVE_OPTS,
+        nl_msg_put_unspec(a, OVS_TUNNEL_KEY_ATTR_GTPU_OPTS,
                           &opts, sizeof(opts));
     }
     nl_msg_end_nested(a, tun_key_ofs);
@@ -3396,16 +3396,16 @@ format_eth(struct ds *ds, const char *name, const struct eth_addr key,
 
 static void
 format_be64(struct ds *ds, const char *name, ovs_be64 key,
-            const ovs_be64 *mask, bool verbose)
+            const ovs_32aligned_be64 *mask_, bool verbose)
 {
-    bool mask_empty = mask && !*mask;
+    ovs_be64 mask = mask_ ? get_32aligned_be64(mask_) : htonll(0);
 
-    if (verbose || !mask_empty) {
-        bool mask_full = !mask || *mask == OVS_BE64_MAX;
+    if (verbose || mask) {
+        bool mask_full = !mask_ || mask == OVS_BE64_MAX;
 
         ds_put_format(ds, "%s=0x%"PRIx64, name, ntohll(key));
         if (!mask_full) { /* Partially masked. */
-            ds_put_format(ds, "/%#"PRIx64, ntohll(*mask));
+            ds_put_format(ds, "/%#"PRIx64, ntohll(mask));
         }
         ds_put_char(ds, ',');
     }
@@ -4597,6 +4597,11 @@ odp_flow_format(const struct nlattr *key, size_t key_len,
                     ds_put_char(ds, ',');
                 }
                 ds_put_cstr(ds, "eth()");
+            } else if (attr_type == OVS_KEY_ATTR_PACKET_TYPE && is_wildcard) {
+                /* See the above help text, however in the case where the
+                 * packet type is not shown, we still need to display the
+                 * eth() header if the packets type is wildcarded. */
+                has_packet_type_key = false;
             }
             ofpbuf_clear(&ofp);
         }
@@ -7119,11 +7124,6 @@ parse_l2_5_onward(const struct nlattr *attrs[OVS_KEY_ATTR_MAX + 1],
                 }
             }
         }
-    } else if (src_flow->nw_proto == IPPROTO_IGMP
-               && src_flow->dl_type == htons(ETH_TYPE_IP)) {
-        /* OVS userspace parses the IGMP type, code, and group, but its
-         * datapaths do not, so there is always missing information. */
-        return ODP_FIT_TOO_LITTLE;
     }
     if (is_mask && expected_bit != OVS_KEY_ATTR_UNSPEC) {
         if ((flow->tp_src || flow->tp_dst) && flow->nw_proto != 0xff) {
@@ -7217,6 +7217,14 @@ parse_8021q_onward(const struct nlattr *attrs[OVS_KEY_ATTR_MAX + 1],
         }
         expected_attrs = 0;
 
+        /* For OVS to be backward compatible with newer datapath
+         * implementations, we should ignore out of range attributes. */
+        if (out_of_range_attr) {
+            VLOG_DBG("Flow key decode found unknown OVS_KEY_ATTR, %d",
+                     out_of_range_attr);
+            out_of_range_attr = 0;
+        }
+
         if (!parse_ethertype(attrs, present_attrs, &expected_attrs,
                              flow, src_flow, errorp)) {
             return ODP_FIT_ERROR;
@@ -7265,6 +7273,14 @@ odp_flow_key_to_flow__(const struct nlattr *key, size_t key_len,
         goto exit;
     }
     expected_attrs = 0;
+
+    /* For OVS to be backward compatible with newer datapath implementations,
+     * we should ignore out of range attributes. */
+    if (out_of_range_attr) {
+        VLOG_DBG("Flow key decode found unknown OVS_KEY_ATTR, %d",
+                 out_of_range_attr);
+        out_of_range_attr = 0;
+    }
 
     /* Metadata. */
     if (present_attrs & (UINT64_C(1) << OVS_KEY_ATTR_RECIRC_ID)) {
@@ -7500,10 +7516,12 @@ parse_key_and_mask_to_match(const struct nlattr *key, size_t key_len,
 
     fitness = odp_flow_key_to_flow(key, key_len, &match->flow, NULL);
     if (fitness) {
-        /* This should not happen: it indicates that
-         * odp_flow_key_from_flow() and odp_flow_key_to_flow() disagree on
-         * the acceptable form of a flow.  Log the problem as an error,
-         * with enough details to enable debugging. */
+        /* This will happen when the odp_flow_key_to_flow() function can't
+         * parse the netlink message to a match structure.  It will return
+         * ODP_FIT_TOO_LITTLE if there is not enough information to parse the
+         * content successfully, ODP_FIT_TOO_MUCH if there is too much netlink
+         * data and we do not know how to safely ignore it, and ODP_FIT_ERROR
+         * in any other case. */
         static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(1, 5);
 
         if (!VLOG_DROP_ERR(&rl)) {
@@ -7511,7 +7529,8 @@ parse_key_and_mask_to_match(const struct nlattr *key, size_t key_len,
 
             ds_init(&s);
             odp_flow_format(key, key_len, NULL, 0, NULL, &s, true);
-            VLOG_ERR("internal error parsing flow key %s", ds_cstr(&s));
+            VLOG_ERR("internal error parsing flow key %s (%s)",
+                     ds_cstr(&s), odp_key_fitness_to_string(fitness));
             ds_destroy(&s);
         }
 
@@ -7521,10 +7540,7 @@ parse_key_and_mask_to_match(const struct nlattr *key, size_t key_len,
     fitness = odp_flow_key_to_mask(mask, mask_len, &match->wc, &match->flow,
                                    NULL);
     if (fitness) {
-        /* This should not happen: it indicates that
-         * odp_flow_key_from_mask() and odp_flow_key_to_mask()
-         * disagree on the acceptable form of a mask.  Log the problem
-         * as an error, with enough details to enable debugging. */
+        /* This should not happen, see comment above. */
         static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(1, 5);
 
         if (!VLOG_DROP_ERR(&rl)) {

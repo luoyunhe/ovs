@@ -215,10 +215,6 @@ struct shash all_dpif_backers = SHASH_INITIALIZER(&all_dpif_backers);
 static struct hmap all_ofproto_dpifs_by_name =
                           HMAP_INITIALIZER(&all_ofproto_dpifs_by_name);
 
-/* All existing ofproto_dpif instances, indexed by ->uuid. */
-static struct hmap all_ofproto_dpifs_by_uuid =
-                          HMAP_INITIALIZER(&all_ofproto_dpifs_by_uuid);
-
 static bool ofproto_use_tnl_push_pop = true;
 static void ofproto_unixctl_init(void);
 static void ct_zone_config_init(struct dpif_backer *backer);
@@ -1682,9 +1678,6 @@ construct(struct ofproto *ofproto_)
     hmap_insert(&all_ofproto_dpifs_by_name,
                 &ofproto->all_ofproto_dpifs_by_name_node,
                 hash_string(ofproto->up.name, 0));
-    hmap_insert(&all_ofproto_dpifs_by_uuid,
-                &ofproto->all_ofproto_dpifs_by_uuid_node,
-                uuid_hash(&ofproto->uuid));
     memset(&ofproto->stats, 0, sizeof ofproto->stats);
 
     ofproto_init_tables(ofproto_, N_TABLES);
@@ -1782,8 +1775,6 @@ destruct(struct ofproto *ofproto_, bool del)
 
     hmap_remove(&all_ofproto_dpifs_by_name,
                 &ofproto->all_ofproto_dpifs_by_name_node);
-    hmap_remove(&all_ofproto_dpifs_by_uuid,
-                &ofproto->all_ofproto_dpifs_by_uuid_node);
 
     OFPROTO_FOR_EACH_TABLE (table, &ofproto->up) {
         CLS_FOR_EACH (rule, up.cr, &table->cls) {
@@ -1819,6 +1810,8 @@ destruct(struct ofproto *ofproto_, bool del)
 
     seq_destroy(ofproto->ams_seq);
 
+    /* Wait for all the meter destroy work to finish. */
+    ovsrcu_barrier();
     close_dpif_backer(ofproto->backer, del);
 }
 
@@ -2308,6 +2301,7 @@ set_ipfix(
     struct dpif_ipfix *di = ofproto->ipfix;
     bool has_options = bridge_exporter_options || flow_exporters_options;
     bool new_di = false;
+    bool options_changed = false;
 
     if (has_options && !di) {
         di = ofproto->ipfix = dpif_ipfix_create();
@@ -2317,7 +2311,7 @@ set_ipfix(
     if (di) {
         /* Call set_options in any case to cleanly flush the flow
          * caches in the last exporters that are to be destroyed. */
-        dpif_ipfix_set_options(
+        options_changed = dpif_ipfix_set_options(
             di, bridge_exporter_options, flow_exporters_options,
             n_flow_exporters_options);
 
@@ -2332,6 +2326,10 @@ set_ipfix(
         if (!has_options) {
             dpif_ipfix_unref(di);
             ofproto->ipfix = NULL;
+        }
+
+        if (new_di || options_changed) {
+            ofproto->backer->need_revalidate = REV_RECONFIGURE;
         }
     }
 
@@ -4432,12 +4430,14 @@ rule_dpif_lookup_from_table(struct ofproto_dpif *ofproto,
                 atomic_add_relaxed(&tbl->n_matched, stats->n_packets, &orig);
             }
             if (xcache) {
-                struct xc_entry *entry;
+                if (ofproto_try_ref(&ofproto->up)) {
+                    struct xc_entry *entry;
 
-                entry = xlate_cache_add_entry(xcache, XC_TABLE);
-                entry->table.ofproto = ofproto;
-                entry->table.id = *table_id;
-                entry->table.match = true;
+                    entry = xlate_cache_add_entry(xcache, XC_TABLE);
+                    entry->table.ofproto = ofproto;
+                    entry->table.id = *table_id;
+                    entry->table.match = true;
+                }
             }
             return rule;
         }
@@ -4468,12 +4468,14 @@ rule_dpif_lookup_from_table(struct ofproto_dpif *ofproto,
                                stats->n_packets, &orig);
         }
         if (xcache) {
-            struct xc_entry *entry;
+            if (ofproto_try_ref(&ofproto->up)) {
+                struct xc_entry *entry;
 
-            entry = xlate_cache_add_entry(xcache, XC_TABLE);
-            entry->table.ofproto = ofproto;
-            entry->table.id = next_id;
-            entry->table.match = (rule != NULL);
+                entry = xlate_cache_add_entry(xcache, XC_TABLE);
+                entry->table.ofproto = ofproto;
+                entry->table.id = next_id;
+                entry->table.match = (rule != NULL);
+            }
         }
         if (rule) {
             goto out;   /* Match. */
@@ -5555,6 +5557,7 @@ ct_set_zone_timeout_policy(const char *datapath_type, uint16_t zone_id,
             ct_timeout_policy_unref(backer, ct_zone->ct_tp);
             ct_zone->ct_tp = ct_tp;
             ct_tp->ref_count++;
+            backer->need_revalidate = REV_RECONFIGURE;
         }
     } else {
         struct ct_zone *new_ct_zone = ct_zone_alloc(zone_id);
@@ -5562,6 +5565,7 @@ ct_set_zone_timeout_policy(const char *datapath_type, uint16_t zone_id,
         cmap_insert(&backer->ct_zones, &new_ct_zone->node,
                     hash_int(zone_id, 0));
         ct_tp->ref_count++;
+        backer->need_revalidate = REV_RECONFIGURE;
     }
 }
 
@@ -5578,6 +5582,7 @@ ct_del_zone_timeout_policy(const char *datapath_type, uint16_t zone_id)
     if (ct_zone) {
         ct_timeout_policy_unref(backer, ct_zone->ct_tp);
         ct_zone_remove_and_destroy(backer, ct_zone);
+        backer->need_revalidate = REV_RECONFIGURE;
     }
 }
 
@@ -5778,15 +5783,7 @@ ofproto_dpif_lookup_by_name(const char *name)
 struct ofproto_dpif *
 ofproto_dpif_lookup_by_uuid(const struct uuid *uuid)
 {
-    struct ofproto_dpif *ofproto;
-
-    HMAP_FOR_EACH_WITH_HASH (ofproto, all_ofproto_dpifs_by_uuid_node,
-                             uuid_hash(uuid), &all_ofproto_dpifs_by_uuid) {
-        if (uuid_equals(&ofproto->uuid, uuid)) {
-            return ofproto;
-        }
-    }
-    return NULL;
+    return xlate_ofproto_lookup(uuid);
 }
 
 static void
@@ -6396,6 +6393,7 @@ ofproto_unixctl_dpif_show_dp_features(struct unixctl_conn *conn,
 
     dpif_show_support(&ofproto->backer->bt_support, &ds);
     unixctl_command_reply(conn, ds_cstr(&ds));
+    ds_destroy(&ds);
 }
 
 static void
