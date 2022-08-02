@@ -58,6 +58,7 @@ Getting started with Open vSwitch (OVS)? Start here.
   :doc:`intro/install/xenserver` |
   :doc:`intro/install/dpdk` |
   :doc:`intro/install/afxdp` |
+  :doc:`intro/install/memif` |
   :doc:`Installation FAQs <faq/releases>`
 
 - **Tutorials:** :doc:`tutorials/faucet` |

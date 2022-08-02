@@ -104,7 +104,6 @@ utilities/bugtool/ovs-bugtool.8: \
 utilities/bugtool/ovs-bugtool.8.in:
 lib/ovs.tmac:
 
-
 utilities/ovs-dpctl-top.8: \
 	utilities/ovs-dpctl-top.8.in \
 	lib/ovs.tmac
@@ -153,8 +152,6 @@ utilities/ovs-pcap.1: \
 utilities/ovs-pcap.1.in:
 lib/common-syn.man:
 lib/common.man:
-lib/ovs.tmac:
-
 lib/ovs.tmac:
 
 utilities/ovs-testcontroller.8: \
@@ -211,6 +208,7 @@ vswitchd/ovs-vswitchd.8: \
 	lib/coverage-unixctl.man \
 	lib/daemon.man \
 	lib/dpctl.man \
+	lib/dpdk-unixctl.man \
 	lib/dpif-netdev-unixctl.man \
 	lib/memory-unixctl.man \
 	lib/netdev-dpdk-unixctl.man \
@@ -230,6 +228,7 @@ lib/common.man:
 lib/coverage-unixctl.man:
 lib/daemon.man:
 lib/dpctl.man:
+lib/dpdk-unixctl.man:
 lib/dpif-netdev-unixctl.man:
 lib/memory-unixctl.man:
 lib/netdev-dpdk-unixctl.man:
