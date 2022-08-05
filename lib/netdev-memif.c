@@ -51,7 +51,9 @@ static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(5, 20);
 static struct ovsthread_once memif_thread_once
     = OVSTHREAD_ONCE_INITIALIZER;
 
-static int epfd; /* Global fd to poll memif events. */
+// static int epfd; /* Global fd to poll memif events. */
+static memif_socket_handle_t memif_socket;
+const char * socket_path = "/run/vpp/master.sock";
 
 struct netdev_rxq_memif {
     struct netdev_rxq up;
@@ -130,129 +132,17 @@ memif_print_details(const struct netdev *netdev)
     free(buf);
 }
 
-static int
-epoll_fd__(int fd, uint32_t events, int op)
-{
-    struct epoll_event evt;
-
-    if (fd < 0) {
-        VLOG_ERR("invalid fd %d", fd);
-        return -1;
-    }
-
-    memset (&evt, 0, sizeof evt);
-    if (op != EPOLL_CTL_DEL) {
-        evt.events = events;
-        evt.data.fd = fd;
-    }
-
-    if (epoll_ctl(epfd, op, fd, &evt) < 0) {
-        VLOG_ERR("epoll_ctl: %s fd %d", ovs_strerror(errno), fd);
-        return -1;
-    }
-
-    VLOG_DBG("fd %d added to epoll", fd);
-    return 0;
-}
-
-static int
-add_epoll_fd(int fd, uint32_t events)
-{
-    VLOG_DBG("fd %d add on epoll", fd);
-    return epoll_fd__(fd, events, EPOLL_CTL_ADD);
-}
-
-static int
-mod_epoll_fd(int fd, uint32_t events)
-{
-    VLOG_DBG("fd %d modify on epoll", fd);
-    return epoll_fd__(fd, events, EPOLL_CTL_MOD);
-}
-
-static int
-del_epoll_fd(int fd)
-{
-    VLOG_DBG("fd %d remove from epoll", fd);
-    return epoll_fd__(fd, 0, EPOLL_CTL_DEL);
-}
-
-static int
-control_fd_update(int fd, uint8_t events, void *ctx OVS_UNUSED)
-{
-    uint32_t evt = 0;
-
-    if (events & MEMIF_FD_EVENT_DEL) {
-        return del_epoll_fd(fd);
-    }
-
-    if (events & MEMIF_FD_EVENT_READ) {
-        evt |= EPOLLIN;
-    }
-    if (events & MEMIF_FD_EVENT_WRITE) {
-        evt |= EPOLLOUT;
-    }
-
-    if (events & MEMIF_FD_EVENT_MOD) {
-        return mod_epoll_fd(fd, evt);
-    }
-
-    return add_epoll_fd(fd, evt);
-}
 
 static void *
 memif_thread(void *f_ OVS_UNUSED)
 {
-    struct epoll_event evt;
-    uint32_t events;
-    struct timespec start, end;
-    sigset_t sigset;
-    int memif_err, en;
     int timeout = -1; /* block */
-
-    while (1) {
-        events = 0;
-
-        sigemptyset(&sigset);
-
-        memset(&evt, 0, sizeof evt);
-        evt.events = EPOLLIN | EPOLLOUT;
-
-        VLOG_INFO_RL(&rl, "epoll pwait");
-        ovsrcu_quiesce_start();
-        en = epoll_pwait(epfd, &evt, 1, timeout, &sigset);
-
-        timespec_get(&start, TIME_UTC);
-        if (en < 0) {
-            VLOG_INFO("epoll_pwait: %s", ovs_strerror(errno));
-            return NULL;
-        }
-
-        if (en > 0) {
-            if (evt.data.fd > 2) {
-                if (evt.events & EPOLLIN) {
-                    events |= MEMIF_FD_EVENT_READ;
-                }
-                if (evt.events & EPOLLOUT) {
-                    events |= MEMIF_FD_EVENT_WRITE;
-                }
-                if (evt.events & EPOLLERR) {
-                    events |= MEMIF_FD_EVENT_ERROR;
-                }
-
-                memif_err = memif_control_fd_handler(evt.data.fd, events);
-                if (memif_err != MEMIF_ERR_SUCCESS) {
-                    VLOG_ERR_RL(&rl, "memif_control_fd_handler: %s",
-                             memif_strerror(memif_err));
-                }
-
-                VLOG_INFO_RL(&rl, "valid fd %d", evt.data.fd);
-            } else {
-                VLOG_ERR_RL(&rl, "unexpected event at memif_epfd. fd %d",
-                            evt.data.fd);
-            }
-        }
-        timespec_get(&end, TIME_UTC);
-    }
+    int err = 0;
+    do
+    {
+      ovsrcu_quiesce_start();
+      err = memif_poll_event (memif_socket, -1);
+    } while (err == MEMIF_ERR_SUCCESS);
     return NULL;
 }
 
@@ -260,13 +150,24 @@ static int
 netdev_memif_init(void)
 {
     int err;
+    memif_socket_args_t memif_socket_args = { 0 };
 
-    epfd = epoll_create(1);
-    add_epoll_fd(0, EPOLLIN);
-
+    sprintf(memif_socket_args.path, "%s", socket_path);
+    sprintf(memif_socket_args.app_name, "%s", "ovs");
+    unlink(socket_path);
     /* Make sure /run/vpp/ exists. */
-    err = memif_init(control_fd_update, "ovs-memif", NULL, NULL, NULL);
-    VLOG_INFO("memif init done, ret = %d", err);
+    err = memif_create_socket(&memif_socket, &memif_socket_args, NULL);
+    if (err != MEMIF_ERR_SUCCESS)
+    {
+      VLOG_INFO ("memif_create_socket: %s", memif_strerror(err));
+    }
+
+    // epfd = epoll_create(1);
+    // add_epoll_fd(0, EPOLLIN);
+
+    // /* Make sure /run/vpp/ exists. */
+    // err = memif_init(control_fd_update, "ovs-memif", NULL, NULL, NULL);
+    // VLOG_INFO("memif init done, ret = %d", err);
 
     return err;
 }
@@ -517,6 +418,7 @@ memif_configure(struct netdev *netdev)
     args.num_s2m_rings = netdev_n_rxq(netdev); /* n_rxq */
     args.num_m2s_rings = netdev_n_txq(netdev); /* n_txq */
     args.mode = MEMIF_INTERFACE_MODE_ETHERNET;
+    args.socket = memif_socket;
 
     /* Interface name. */
     dev_name = netdev_get_name(netdev);
