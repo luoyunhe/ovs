@@ -15,6 +15,8 @@ if WIN32
 lib_libopenvswitch_la_LIBADD += ${PTHREAD_LIBS}
 endif
 
+lib_libopenvswitch_la_LIBADD += $(LIBMEMIF_LDADD)
+
 lib_libopenvswitch_la_LDFLAGS = \
         $(OVS_LTINFO) \
         -Wl,--version-script=$(top_builddir)/lib/libopenvswitch.sym \
@@ -497,6 +499,12 @@ lib_libopenvswitch_la_SOURCES += \
 	lib/netdev-afxdp-pool.h \
 	lib/netdev-afxdp.c \
 	lib/netdev-afxdp.h
+endif
+
+if HAVE_MEMIF
+lib_libopenvswitch_la_SOURCES += \
+	lib/netdev-memif.c \
+	lib/netdev-memif.h
 endif
 
 if DPDK_NETDEV
