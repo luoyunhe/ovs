@@ -3195,12 +3195,13 @@ dpdk_copy_dp_packet_to_mbuf(struct rte_mempool *mp, struct dp_packet *pkt_orig)
 
     return pkt_dest;
 }
-
+size_t
+dpdk_copy_batch_to_mbuf(struct netdev *netdev, struct dp_packet_batch *batch);
 /* Replace packets in a 'batch' with their corresponding copies using
  * DPDK memory.
  *
  * Returns the number of good packets in the batch. */
-static size_t
+size_t
 dpdk_copy_batch_to_mbuf(struct netdev *netdev, struct dp_packet_batch *batch)
 {
     struct netdev_dpdk *dev = netdev_dpdk_cast(netdev);

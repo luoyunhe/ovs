@@ -206,6 +206,10 @@ lib_libopenvswitch_la_SOURCES = \
 	lib/namemap.c \
 	lib/netdev-dpdk.h \
 	lib/netdev-dummy.c \
+	lib/netdev-ringif.c \
+	lib/netdev-ringif.h \
+	lib/netdev-ringif-utils.c \
+	lib/netdev-ringif-utils.h \
 	lib/netdev-offload.c \
 	lib/netdev-offload.h \
 	lib/netdev-offload-provider.h \
